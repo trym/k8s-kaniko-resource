@@ -1,0 +1,102 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec 1>&2 # redirect all output to stderr for logging
+
+source /opt/resource/assets/common.sh
+
+# Read inputs
+source=$1
+payload=$(mktemp kaniko-build-request.XXXXXX)
+cat > $payload <&0
+
+setup_resource $payload $source
+echo "Resource setup successful."
+
+
+# Parse source configuration
+gcloud_credentials=$(jq -r '.source.gcloud_credentials // ""' < $payload)
+gcloud_bucket=$(jq -r '.source.gcloud_bucket // ""' < $payload)
+export docker_config_secret=$(jq -r '.source.docker_config_secret // ""' < $payload)
+export gcloud_sa_secret=$(jq -r '.source.gcloud_sa_secret // "gcloud-sa"' < $payload)
+export cpu_request=$(jq -r '.source.cpu_request // "1.0"' < $payload)
+export memory_request=$(jq -r '.source.memory_request // "128Mi"' < $payload)
+export cpu_limit=$(jq -r '.source.cpu_limit // "2.0"' < $payload)
+export memory_limit=$(jq -r '.source.memory_limit // "1Gi"' < $payload)
+
+# Parse parameters
+export image_name=$(jq -r '.params.image_name // ""' < $payload)
+export registry=$(jq -r '.params.registry // ""' < $payload)
+tag_file=$(jq -r '.params.tag_file // ""' < $payload)
+build_context=$(jq -r '.params.build_context // "."' < $payload)
+export dockerfile=$(jq -r '.params.dockerfile // "Dockerfile"' < $payload)
+export start_timeout=$(jq -r '.params.start_timeout // "300"' < $payload)
+export build_timeout=$(jq -r '.params.build_timeout // "600"' < $payload)
+
+echo $gcloud_credentials | base64 -d > /tmp/gcloud-credentials.json
+gcloud auth activate-service-account --key-file=/tmp/gcloud-credentials.json
+
+if [[ -z "$image_name" || -z "$registry" || -z "$tag_file" || -z "$gcloud_credentials" || -z "$gcloud_bucket" ]]; then
+  echo "invalid payload"
+  exit 1
+fi
+
+if [ -f "$source/$tag_file" ]; then
+  tag=`cat $source/$tag_file`
+elif [ -n "$tag_file" ]; then
+  tag=$tag_file
+fi
+
+
+export context_url=gs://$gcloud_bucket/$BUILD_ID.tgz
+export full_image_ref=$registry/$image_name:$tag
+export pod_name=kaniko-build-$image_name-$BUILD_ID
+# Put build context in a bucket
+echo Uploading docker build context to $context_url
+
+gitignore_path=$source/$build_context/.gitignore
+if [ -f "$gitignore_path" ]; then
+  exclude="--exclude-from=$gitignore_path"
+else
+  exclude=""
+fi
+
+tar $exclude -C $source/$build_context -cz . | gsutil cp - $context_url #FIXME name
+
+k8s_namespace=concourse-$BUILD_TEAM_NAME
+k="kubectl --namespace $k8s_namespace"
+
+# Create build pod
+envsubst < assets/kaniko-build-pod.yaml | $k apply -f -
+
+echo Attempting to build $full_image_ref
+echo Waiting for pod to start..
+
+if $k wait --timeout=${start_timeout}s --for=condition=Initialized pod/$pod_name; then
+  for run in {1..10}
+  do
+    $k logs -f $pod_name && break || true
+    sleep 5
+  done
+else 
+  $k describe pod/$pod_name
+  exit 1
+fi 
+
+phase=$($k get pod/$pod_name -o jsonpath="{.status.phase}")
+
+gsutil rm $context_url
+
+if [ $phase = "Succeeded" ]; then
+  result="$(jq -n "{repository:\"$registry/$image_name\", version:{tag:\"$tag\"}, metadata: []}")"
+  echo "$result" | jq -s add  >&3
+  $k delete pod $pod_name
+else
+  echo Error: build pod failed, dumping pod description..
+  $k describe pod/$pod_name
+  $k delete pod $pod_name
+  exit 1
+fi

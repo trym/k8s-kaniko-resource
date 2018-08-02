@@ -1,0 +1,41 @@
+#
+# Required vars: NAME CONTEXT_URL DOCKERFILE IMAGE TIMEOUT
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+spec:
+  activeDeadlineSeconds: $build_timeout
+  volumes:
+  - name: gcloud-sa
+    secret:
+      secretName: $gcloud_sa_secret
+  - name: docker-config
+    secret:
+      secretName: $docker_config_secret
+  containers:
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor
+    args: [
+      '--context=$context_url', # gs://$BUCKET/$NAME.tar.gz
+      '--dockerfile=$dockerfile',
+      '--destination=$full_image_ref'
+    ]
+    volumeMounts:
+    - name: gcloud-sa
+      mountPath: /var/run/gcloud
+    - name: docker-config
+      mountPath: /kaniko/.docker
+    env:
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: /var/run/gcloud/credentials
+    - name: DOCKER_REGISTRY_AUTH
+    resources:
+      requests:
+        cpu: $cpu_request
+        memory: $memory_request
+      limits:
+        cpu: $cpu_limit
+        memory: $memory_limit
+  restartPolicy: Never

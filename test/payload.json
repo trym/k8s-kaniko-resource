@@ -1,0 +1,18 @@
+{
+  "source": {
+    "k8s_cluster_url": "$K8S_CLUSTER_URL",
+    "k8s_cluster_ca": "$K8S_CLUSTER_CA",
+    "k8s_token": "$K8S_TOKEN",
+    "gcloud_credentials": "$GCLOUD_CREDENTIALS",
+    "gcloud_bucket": "$GCLOUD_BUCKET",
+    "docker_config_secret": "docker-registry-config"
+  },
+  "params": {
+    "image_name": "ass",
+    "tag_file": "docker-tags/tag",
+    "build_context": "src",
+    "dockerfile": "Dockerfile.custom",
+    "registry": "images.trymtest.skalar.cloud",
+    "start_timeout": "5"
+  }
+}
